@@ -551,35 +551,31 @@ pub async fn run_repl_command(
                 let client =
                     Select::new("API Provider (required):", list_client_types()).prompt()?;
                 let (model, clients_config) = create_client_config(client).await?;
-
-                let first_elem = clients_config
+                let first_client_config = clients_config
                     .as_array()
-                    .and_then(|arr| arr.get(0))
+                    .and_then(|arr| arr.first())
                     .ok_or_else(|| anyhow::anyhow!("No client configuration found to add."))?;
+                let first_client_config_yml = serde_yaml::to_value(first_client_config)?;
 
                 let config_path = Config::config_file();
-                let file = File::open(&config_path)?;
-                let mut my_data: serde_yaml::Value = serde_yaml::from_reader(file)?;
-                let yaml_value: serde_yaml::Value = {
-                    let json_string = serde_json::to_string(&first_elem)?;
-                    serde_yaml::from_str(&json_string)?
-                };
-                if let Some(clients) = my_data.get_mut("clients") {
-                    if let serde_yaml::Value::Sequence(clients_vec) = clients {
-                        clients_vec.push(yaml_value);
-                    } else {
-                        println!("Expected 'clients' to be a sequence, but it wasn't.");
-                    }
-                } else {
-                    my_data["clients"] = serde_yaml::Value::Sequence(vec![yaml_value]);
-                }
-                my_data["model"] = model.into();
-                let config_data =
-                    serde_yaml::to_string(&my_data).with_context(|| "Failed to create config")?;
+                let mut config_yml: serde_yaml::Value =
+                    serde_yaml::from_reader(File::open(&config_path)?)?;
+
+                config_yml["clients"]
+                    .as_sequence_mut()
+                    .map(|seq| seq.push(first_client_config_yml.clone()))
+                    .unwrap_or_else(|| {
+                        config_yml["clients"] =
+                            serde_yaml::Value::Sequence(vec![first_client_config_yml.clone()]);
+                    });
+                config_yml["model"] = model.into();
+
+                let config_data = serde_yaml::to_string(&config_yml)
+                    .context("Failed to serialize updated config to YAML")?;
                 std::fs::write(&config_path, config_data)
                     .with_context(|| format!("Failed to write to '{}'", config_path.display()))?;
 
-                println!("✓ Added new client & set default model to {} in config file; restart to apply changes\n", {model});
+                println!("✓ Added new client & set default model in config file; restart to apply changes");
             }
             ".compress" => match args {
                 Some("session") => {
