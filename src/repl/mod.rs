@@ -6,7 +6,9 @@ use self::completer::ReplCompleter;
 use self::highlighter::ReplHighlighter;
 use self::prompt::ReplPrompt;
 
-use crate::client::{call_chat_completions, call_chat_completions_streaming};
+use crate::client::{
+    call_chat_completions, call_chat_completions_streaming, create_client_config, list_client_types,
+};
 use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage,
     StateFlags,
@@ -15,6 +17,8 @@ use crate::render::render_error;
 use crate::utils::{
     abortable_run_with_spinner, create_abort_signal, dimmed_text, set_text, temp_file, AbortSignal,
 };
+
+use inquire::Select;
 
 use anyhow::{bail, Context, Result};
 use crossterm::cursor::SetCursorStyle;
@@ -26,12 +30,13 @@ use reedline::{
     ReedlineEvent, ReedlineMenu, ValidationResult, Validator, Vi,
 };
 use reedline::{MenuBuilder, Signal};
+use std::fs::File;
 use std::sync::LazyLock;
 use std::{env, process};
 
 const MENU_NAME: &str = "completion_menu";
 
-static REPL_COMMANDS: LazyLock<[ReplCommand; 36]> = LazyLock::new(|| {
+static REPL_COMMANDS: LazyLock<[ReplCommand; 37]> = LazyLock::new(|| {
     [
         ReplCommand::new(".help", "Show this help guide", AssertState::pass()),
         ReplCommand::new(".info", "Show system info", AssertState::pass()),
@@ -181,6 +186,11 @@ static REPL_COMMANDS: LazyLock<[ReplCommand; 36]> = LazyLock::new(|| {
         ReplCommand::new(
             ".delete",
             "Delete roles, sessions, RAGs, or agents",
+            AssertState::pass(),
+        ),
+        ReplCommand::new(
+            ".add",
+            "Add a new client & set default model based on examples",
             AssertState::pass(),
         ),
         ReplCommand::new(".exit", "Exit REPL", AssertState::pass()),
@@ -536,6 +546,40 @@ pub async fn run_repl_command(
                         println!(r#"Usage: .edit <config|role|session|rag-docs|agent-config>"#)
                     }
                 }
+            }
+            ".add" => {
+                let client =
+                    Select::new("API Provider (required):", list_client_types()).prompt()?;
+                let (model, clients_config) = create_client_config(client).await?;
+
+                let first_elem = clients_config
+                    .as_array()
+                    .and_then(|arr| arr.get(0))
+                    .ok_or_else(|| anyhow::anyhow!("No client configuration found to add."))?;
+
+                let config_path = Config::config_file();
+                let file = File::open(&config_path)?;
+                let mut my_data: serde_yaml::Value = serde_yaml::from_reader(file)?;
+                let yaml_value: serde_yaml::Value = {
+                    let json_string = serde_json::to_string(&first_elem)?;
+                    serde_yaml::from_str(&json_string)?
+                };
+                if let Some(clients) = my_data.get_mut("clients") {
+                    if let serde_yaml::Value::Sequence(clients_vec) = clients {
+                        clients_vec.push(yaml_value);
+                    } else {
+                        println!("Expected 'clients' to be a sequence, but it wasn't.");
+                    }
+                } else {
+                    my_data["clients"] = serde_yaml::Value::Sequence(vec![yaml_value]);
+                }
+                my_data["model"] = model.into();
+                let config_data =
+                    serde_yaml::to_string(&my_data).with_context(|| "Failed to create config")?;
+                std::fs::write(&config_path, config_data)
+                    .with_context(|| format!("Failed to write to '{}'", config_path.display()))?;
+
+                println!("✓ Added new client & set default model to {} in config file; restart to apply changes\n", {model});
             }
             ".compress" => match args {
                 Some("session") => {
